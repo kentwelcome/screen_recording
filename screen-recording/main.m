@@ -45,6 +45,59 @@ void focusPidWithAppleScript(NSNumber* pidNumber) {
     [[[NSAppleScript alloc] initWithSource:applescript] executeAndReturnError:nil ];
 }
 
+void focusPidWithAccessibilityApi(NSNumber* pidNumber){
+    AXUIElementRef applicaitonRef = NULL;
+    applicaitonRef = AXUIElementCreateApplication([pidNumber intValue]);
+    if (applicaitonRef) {
+        AXUIElementSetAttributeValue(applicaitonRef, kAXMainAttribute, kCFBooleanTrue);
+        AXUIElementSetAttributeValue(applicaitonRef, kAXFrontmostAttribute, kCFBooleanTrue);
+        CFRelease(applicaitonRef);
+    }
+}
+
+void resetPosition(AXUIElementRef elementRef, CGRect *windowRect, int idx)
+{
+    Boolean isSettable = false;
+    AXUIElementIsAttributeSettable(elementRef, kAXPositionAttribute, &isSettable);
+    if (isSettable == true) {
+        CGPoint     absWinPos = CGPointMake((idx-1)*(windowRect->size.width + 10),0);
+        CGPoint     windowPosition;
+        CFTypeRef   newPosition = AXValueCreate(kAXValueCGPointType, (void *)&absWinPos);
+        CFTypeRef   position;
+        
+        NSLog(@"Reset position...");
+        AXUIElementSetAttributeValue(elementRef, kAXPositionAttribute, newPosition);
+        CFRelease(newPosition);
+        
+        // Get real window position
+        AXUIElementCopyAttributeValue(elementRef, kAXPositionAttribute, &position);
+        AXValueGetValue(position,kAXValueCGPointType,&windowPosition);
+        CFRelease(position);
+        
+        windowRect->origin.x = windowPosition.x;
+        windowRect->origin.y = windowPosition.y;
+        NSLog(@"New Boulds: %@",[NSValue valueWithRect:*windowRect]);
+    }
+    else {
+        NSLog(@"Can't set position...");
+    }
+}
+
+void modifyWindowPositionByPid(pid_t pid, CGRect *windowRect, int idx)
+{
+    AXUIElementRef applicaitonRef = NULL;
+    AXUIElementRef mainWindowRef = NULL;
+    applicaitonRef = AXUIElementCreateApplication(pid);
+    
+    if (applicaitonRef) {
+        AXUIElementCopyAttributeValue(applicaitonRef, kAXMainWindowAttribute, (CFTypeRef*)&mainWindowRef);
+        if (mainWindowRef) {
+            resetPosition(mainWindowRef, windowRect, idx);
+        }
+    }
+    CFRelease(applicaitonRef);
+}
+
 // Print all owners to the console. Used for debugging.
 void printOwners() {
     // code from https://github.com/square/zapp/blob/fcfb7fbd987cd44711e998f7071e414a88fa721c/Zapp/ZappVideoController.m#L24
@@ -56,6 +109,26 @@ void printOwners() {
     }
 }
 
+BOOL checkDeviceNameFromWindowName(NSString *deviceName, NSString *windowName)
+{
+    NSString *comparePattern = [[NSString alloc] initWithFormat:@"iOS Simulator - %@ - ",deviceName];
+    
+    if ([windowName compare:comparePattern options:NSLiteralSearch range:NSMakeRange(0,[comparePattern length])] == 0) {
+        return YES;
+    }
+    
+    return NO;
+}
+
+BOOL simulatorCalulator(NSString *windowName, int *simulatorCounter)
+{
+    NSString *comparePattern = [[NSString alloc] initWithFormat:@"iOS Simulator "];
+    if ([windowName compare:comparePattern options:NSLiteralSearch range:NSMakeRange(0,[comparePattern length])] == 0) {
+        *simulatorCounter = *simulatorCounter + 1;
+    }
+    return YES;
+}
+
 extern void CGSInitialize(void);
 
 // Locate window by owner name and return found, pid, bounds, and displayID.
@@ -63,21 +136,32 @@ extern void CGSInitialize(void);
 //   pid       - (NSNumber) the process id
 //   bounds    - (NSValue) CGRect containing the window bounds
 //   displayID - (NSNumber) the displayID that contains the found window
-NSDictionary* findWindowBoundsAndPid(NSString* ownerName) {
+NSDictionary* findWindowBoundsAndPid(NSString* ownerName, NSString* deviceName) {
     // code from https://github.com/square/zapp/blob/fcfb7fbd987cd44711e998f7071e414a88fa721c/Zapp/ZappVideoController.m#L24
     CGDirectDisplayID displayID = 0;
     CGWindowID windowID = 0;
-    NSArray *windowList = objc_retainedObject(CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID));
+    int simulatorCounter = 0;
+    //kCGWindowListOptionAll, kCGWindowListOptionOnScreenOnly
+    NSArray *windowList = objc_retainedObject(CGWindowListCopyWindowInfo(kCGWindowListOptionAll, kCGNullWindowID));
     CGRect windowRect;
     for (NSDictionary *info in windowList) {
-        if ([[info objectForKey:(NSString *)kCGWindowOwnerName] isEqualToString:ownerName] &&
-            ![[info objectForKey:(NSString *)kCGWindowName] isEqualToString:@""]) {
+        NSString *WindowName = [info objectForKey:(NSString *)kCGWindowName];
+        NSString *CGOwnerName = [info objectForKey:(NSString *)kCGWindowOwnerName];
+        if ([CGOwnerName isEqualToString:ownerName] &&
+            WindowName != NULL && ![WindowName isEqualToString:@""] &&
+            simulatorCalulator(WindowName,&simulatorCounter) &&
+            checkDeviceNameFromWindowName(deviceName, [info objectForKey:(NSString *)kCGWindowName])) {
+            
             NSNumber* pid = [info objectForKey:(id)kCGWindowOwnerPID];
+            
             CGSInitialize();
             windowID = [[info objectForKey:(NSString *)kCGWindowNumber] unsignedIntValue];
             CGRectMakeWithDictionaryRepresentation((CFDictionaryRef)objc_unretainedPointer([info objectForKey:(NSString *)kCGWindowBounds]), &windowRect);
+            
+            modifyWindowPositionByPid([pid intValue], &windowRect, simulatorCounter);
+            
             CGGetDisplaysWithRect(windowRect, 1, &displayID, NULL);
-
+            
             return @{ @"found"  : windowID ? @YES : @NO, // NSNumber
                       @"pid"    : pid, // NSNumber
                       @"bounds" : [NSValue valueWithRect:windowRect],
@@ -89,10 +173,10 @@ NSDictionary* findWindowBoundsAndPid(NSString* ownerName) {
     return @{ @"found" : @NO };
 }
 
-NSDictionary* findWithRetry(NSString* ownerName) {
+NSDictionary* findWithRetry(NSString* ownerName, NSString* deviceName) {
     NSDictionary* result;
     for (int i = 0; i < 10; i++) {
-        result = findWindowBoundsAndPid(ownerName);
+        result = findWindowBoundsAndPid(ownerName,deviceName);
 
         // return if we've found a match, otherwise try again in a second.
         if ([[result objectForKey:@"found"] intValue]) {
@@ -105,13 +189,13 @@ NSDictionary* findWithRetry(NSString* ownerName) {
 }
 
 // Locate iOS Window and return found, pid, bounds, and displayID.
-NSDictionary* findiOSWindowBoundsAndPid() {
-    return findWithRetry(@"iOS Simulator");
+NSDictionary* findiOSWindowBoundsAndPid(NSString *deviceName) {
+    return findWithRetry(@"iOS Simulator",deviceName);
 }
 
 // Locate Android Window and return found, pid, bounds, and displayID.
 NSDictionary* findAndroidWindowBoundsAndPid() {
-    return findWithRetry(@"emulator64-x86");
+    return findWithRetry(@"emulator64-x86",NULL);
 }
 
 // Deletes the file. Errors if the file is a directory or deletion fails.
@@ -155,7 +239,7 @@ void stopRunning() {
     exit(0);
 }
 
-void run(NSString* os, NSString* path) {
+void run(NSString* os, NSString* path, NSString* deviceName) {
     #ifdef DEBUG
         NSLog(@"DEBUG mode enabled.");
     #endif
@@ -165,7 +249,7 @@ void run(NSString* os, NSString* path) {
     NSArray* validOS = @[@"ios", @"android"];
     switch ([validOS indexOfObject:os]) {
         case 0: // @"ios"
-            targetWindow = findiOSWindowBoundsAndPid();
+            targetWindow = findiOSWindowBoundsAndPid(deviceName);
             break;
         case 1: // @"android"
             targetWindow = findAndroidWindowBoundsAndPid();
@@ -189,7 +273,7 @@ void run(NSString* os, NSString* path) {
 
     NSNumber* pid = [targetWindow objectForKey:@"pid"];
     Log(@"pid: %@", pid);
-    focusPidWithAppleScript(pid);
+    focusPidWithAccessibilityApi(pid);
 
     int displayID = [[targetWindow objectForKey:@"displayID"] intValue];
     Log(@"displayID: %i", displayID);
@@ -239,14 +323,15 @@ void run(NSString* os, NSString* path) {
 int main(int argc, const char* argv[]) {
     @autoreleasepool {
         if (argc != 3) {
-            NSLog(@"Usage: ./screen-recording ios /tmp/video.mov");
+            NSLog(@"Usage: ./screen-recording device /tmp/video.mov");
             exit(0);
         }
 
-        NSString* os = [NSString stringWithUTF8String:argv[1]]; // "ios"
+        //NSString* os = [NSString stringWithUTF8String:argv[1]]; // "ios"
+        NSString* deviceName = [NSString stringWithUTF8String:argv[1]]; // "SimuitlDebug"
         NSString* path = [NSString stringWithUTF8String:argv[2]]; // "/tmp/video.mov"
 
-        run(os, path);
+        run(@"ios", path, deviceName);
     }
 
     return 0;

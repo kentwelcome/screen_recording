@@ -1,4 +1,5 @@
 .*
+*.xccheckout
 screen-recording.xcodeproj/xcuserdata/user.xcuserdatad/xcdebugger/
 screen-recording.xcodeproj/project.xcworkspace/xcuserdata/
 bin/
