@@ -47,11 +47,16 @@ void focusPidWithAppleScript(NSNumber* pidNumber) {
 
 void focusPidWithAccessibilityApi(NSNumber* pidNumber){
     AXUIElementRef applicaitonRef = NULL;
+    AXError err = kAXErrorFailure;
+    
     applicaitonRef = AXUIElementCreateApplication([pidNumber intValue]);
     if (applicaitonRef) {
-        AXUIElementSetAttributeValue(applicaitonRef, kAXMainAttribute, kCFBooleanTrue);
-        AXUIElementSetAttributeValue(applicaitonRef, kAXFrontmostAttribute, kCFBooleanTrue);
+        err = AXUIElementSetAttributeValue(applicaitonRef, kAXFrontmostAttribute, kCFBooleanTrue);
         CFRelease(applicaitonRef);
+    }
+    if (err != kAXErrorSuccess) {
+        Log(@"Focus window by AppleScript...");
+        focusPidWithAppleScript(pidNumber);
     }
 }
 
@@ -65,7 +70,6 @@ void resetPosition(AXUIElementRef elementRef, CGRect *windowRect, int idx)
         CFTypeRef   newPosition = AXValueCreate(kAXValueCGPointType, (void *)&absWinPos);
         CFTypeRef   position;
         
-        NSLog(@"Reset position...");
         AXUIElementSetAttributeValue(elementRef, kAXPositionAttribute, newPosition);
         CFRelease(newPosition);
         
@@ -76,10 +80,10 @@ void resetPosition(AXUIElementRef elementRef, CGRect *windowRect, int idx)
         
         windowRect->origin.x = windowPosition.x;
         windowRect->origin.y = windowPosition.y;
-        NSLog(@"New Boulds: %@",[NSValue valueWithRect:*windowRect]);
+        Log(@"Reset Boulds to: %@",[NSValue valueWithRect:*windowRect]);
     }
     else {
-        NSLog(@"Can't set position...");
+        Log(@"Error: Can't set position...");
     }
 }
 
